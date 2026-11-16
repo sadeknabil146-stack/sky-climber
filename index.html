@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0b0b1a">
+<meta name="apple-mobile-web-app-title" content="Sky Climber">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<title>Sky Climber</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #05050f;
+    overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  #game { position: absolute; top: 0; left: 50%; transform: translateX(-50%); overflow: hidden; background: #111; }
+  #c { display: block; width: 100%; height: 100%; touch-action: none; }
+  #hud {
+    position: absolute; top: 0; left: 0; right: 0;
+    display: none; justify-content: space-between; align-items: flex-start;
+    padding: calc(env(safe-area-inset-top, 0px) + 10px) 14px 0;
+    color: #fff; pointer-events: none; text-shadow: 0 2px 4px rgba(0,0,0,.6);
+  }
+  #hud .lbl { font-size: 11px; opacity: .7; letter-spacing: 1px; text-transform: uppercase; }
+  #hud .val { font-size: 28px; font-weight: 800; line-height: 1; }
+  #hud .right { text-align: right; }
+  #hud .right .val { font-size: 18px; }
+  .screen {
+    position: absolute; inset: 0;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; background: rgba(8, 8, 26, .74);
+    color: #fff; text-align: center; padding: 20px;
+  }
+  .screen.show { display: flex; }
+  h1 { margin: 0; font-size: 40px; letter-spacing: 1px; }
+  h2 { margin: 0; font-size: 32px; color: #ff6b6b; }
+  .big { font-size: 56px; font-weight: 800; line-height: 1; }
+  .stat { font-size: 15px; opacity: .85; }
+  .hint { font-size: 13px; opacity: .6; max-width: 260px; line-height: 1.5; }
+  button {
+    font: inherit; font-size: 20px; font-weight: 700;
+    padding: 14px 44px; border: 0; border-radius: 40px;
+    background: #ffd23f; color: #222; cursor: pointer;
+    box-shadow: 0 5px 0 #c79a00;
+    touch-action: manipulation;
+  }
+  button:active { transform: translateY(3px); box-shadow: 0 2px 0 #c79a00; }
+</style>
+</head>
+<body>
+<div id="game">
+  <canvas id="c"></canvas>
+
+  <div id="hud">
+    <div><div class="lbl">Score</div><div class="val" id="hudScore">0</div></div>
+    <div class="right"><div class="lbl">Best</div><div class="val" id="hudBest">0</div></div>
+  </div>
+
+  <div id="startScreen" class="screen show">
+    <h1>SKY CLIMBER</h1>
+    <div class="stat">Best: <b id="startBest">0</b></div>
+    <button id="startBtn">START</button>
+    <div class="hint">Touch and drag your finger left or right to move. The character jumps by itself.</div>
+  </div>
+
+  <div id="overScreen" class="screen">
+    <h2>GAME OVER</h2>
+    <div class="stat">Score</div>
+    <div class="big" id="overScore">0</div>
+    <div class="stat">Best: <b id="overBest">0</b></div>
+    <div id="newBest" class="stat" style="color:#ffd23f;display:none">New best!</div>
+    <button id="restartBtn">RESTART</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* =====================================================
+     CONFIG  (all the tuning numbers are here)
+     ===================================================== */
+  var W = 360;               // logical width, height changes with the screen
+  var GRAVITY = 1800;        // px/s^2
+  var JUMP = 780;            // base jump speed (about 169px high)
+  var JUMP_BOOST = 0.15;     // extra jump power from horizontal speed (Icy Tower feel)
+  var MAX_VX = 480;          // max horizontal speed
+  var FOLLOW = 14;           // how strongly the player chases the finger
+  var ACCEL = 16;            // how fast speed changes (higher = snappier)
+  var LEAD = 170;            // max distance between player and finger target
+  var SENSITIVITY = 1.25;    // finger movement -> target movement
+  var PW = 28, PH = 34;      // player size
+  var PLAT_H = 12;           // platform thickness
+  var STEP = 1 / 120;        // fixed physics step
+  var VANISH_PERIOD = 2.4, VANISH_VISIBLE = 1.5;
+  var STORAGE_KEY = 'skyClimberBest';
+
+  /* =====================================================
+     RENDERER  (replace these functions later for real graphics)
+     ===================================================== */
+  var Renderer = {
+    background: function (ctx, H, camY, score) {
+      var hue = 232 - Math.min(score / 12, 90);
+      ctx.fillStyle = 'hsl(' + hue + ',45%,15%)';
+      ctx.fillRect(0, 0, W, H);
+      // faint horizontal lines so you can feel the scrolling
+      ctx.fillStyle = 'rgba(255,255,255,0.05)';
+      var spacing = 120;
+      var first = Math.floor(camY / spacing) * spacing;
+      for (var y = first; y < camY + H + spacing; y += spacing) {
+        ctx.fillRect(0, y - camY, W, 2);
+      }
+    },
+    platform: function (ctx, pl, camY, time) {
+      var sy = pl.y + pl.fy - camY;
+      var alpha = 1;
+      var color = '#4caf50';
+      if (pl.type === 'moving') color = '#42a5f5';
+      if (pl.type === 'fragile') color = '#a1887f';
+      if (pl.type === 'vanish') {
+        color = '#ab47bc';
+        var t = (time + pl.phase) % VANISH_PERIOD;
+        if (t < VANISH_VISIBLE) {
+          alpha = (t > VANISH_VISIBLE - 0.4) ? (0.4 + 0.6 * Math.abs(Math.sin(t * 22))) : 1;
+        } else {
+          alpha = 0.13;
+        }
+      }
+      if (pl.broken) alpha = Math.max(0, 1 - pl.fy / 300);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = color;
+      ctx.fillRect(pl.x, sy, pl.w, PLAT_H);
+      ctx.fillStyle = 'rgba(255,255,255,0.28)';
+      ctx.fillRect(pl.x, sy, pl.w, 3);
+      if (pl.type === 'fragile' && !pl.broken) {
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        for (var i = 1; i < 4; i++) ctx.fillRect(pl.x + pl.w * i / 4 - 1, sy, 2, PLAT_H);
+      }
+      ctx.globalAlpha = 1;
+    },
+    player: function (ctx, p, camY) {
+      var sx = p.x, sy = p.y - camY;
+      this._player(ctx, sx, sy, p);
+      if (sx < PW) this._player(ctx, sx + W, sy, p);
+      if (sx > W - PW) this._player(ctx, sx - W, sy, p);
+    },
+    _player: function (ctx, x, feetY, p) {
+      var sq = p.squash;                         // 0..1 squash amount
+      var stretch = Math.min(Math.abs(p.vy) / 1200, 0.18);
+      var w = PW * (1 + sq * 0.25 - stretch * 0.5);
+      var h = PH * (1 - sq * 0.25 + stretch);
+      ctx.fillStyle = '#ff7043';
+      ctx.fillRect(x - w / 2, feetY - h, w, h);
+      ctx.fillStyle = '#fff';
+      var look = Math.max(-1, Math.min(1, p.vx / 250)) * 3;
+      ctx.fillRect(x - 8 + look, feetY - h + 8, 6, 7);
+      ctx.fillRect(x + 2 + look, feetY - h + 8, 6, 7);
+      ctx.fillStyle = '#222';
+      ctx.fillRect(x - 6 + look * 1.4, feetY - h + 10, 3, 4);
+      ctx.fillRect(x + 4 + look * 1.4, feetY - h + 10, 3, 4);
+    }
+  };
+
+  /* =====================================================
+     DOM + CANVAS SETUP
+     ===================================================== */
+  var $ = function (id) { return document.getElementById(id); };
+  var gameEl = $('game'), cv = $('c'), ctx = cv.getContext('2d');
+  var hud = $('hud'), hudScore = $('hudScore'), hudBest = $('hudBest');
+  var startScreen = $('startScreen'), overScreen = $('overScreen');
+
+  var H = 640, gw = 360, gh = 640, dpr = 1, sc = 1;
+
+  function resize() {
+    var iw = window.innerWidth, ih = window.innerHeight;
+    gw = Math.min(iw, ih * 0.62);
+    gh = ih;
+    gameEl.style.width = gw + 'px';
+    gameEl.style.height = gh + 'px';
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cv.width = Math.round(gw * dpr);
+    cv.height = Math.round(gh * dpr);
+    sc = gw / W;
+    H = gh / sc;
+    if (state === 'start') resetWorld();
+  }
+
+  /* =====================================================
+     STATE
+     ===================================================== */
+  var state = 'start';       // 'start' | 'play' | 'over'
+  var player, platforms, camY, time, topY, groundY, maxHeight, score, best, lastType, autoScroll;
+
+  // input
+  var active = false, activeId = null, anchorTouch = 0, anchorTarget = 0, target = 0;
+
+  function loadBest() {
+    try { return parseInt(localStorage.getItem(STORAGE_KEY), 10) || 0; } catch (e) { return 0; }
+  }
+  function saveBest(v) {
+    try { localStorage.setItem(STORAGE_KEY, String(v)); } catch (e) {}
+  }
+  best = loadBest();
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function difficulty() { return Math.min(1, score / 600); }
+
+  /* =====================================================
+     WORLD GENERATION
+     ===================================================== */
+  function makePlatform(x, y, w, type) {
+    var pl = { x: x, y: y, w: w, type: type, fy: 0, fv: 0, broken: false, dir: 1, speed: 0, phase: 0 };
+    if (type === 'moving') {
+      pl.speed = rand(40, 100) * (1 + difficulty());
+      pl.dir = Math.random() < 0.5 ? -1 : 1;
+    }
+    if (type === 'vanish') pl.phase = rand(0, VANISH_PERIOD);
+    return pl;
+  }
+
+  function pickType() {
+    var d = difficulty();
+    if (lastType === 'fragile' || lastType === 'vanish') {
+      return (score > 10 && Math.random() < 0.3) ? 'moving' : 'normal';
+    }
+    var r = Math.random();
+    var pMoving = score > 10 ? 0.10 + 0.20 * d : 0;
+    var pFragile = score > 20 ? 0.05 + 0.15 * d : 0;
+    var pVanish = score > 30 ? 0.05 + 0.15 * d : 0;
+    if (r < pMoving) return 'moving';
+    if (r < pMoving + pFragile) return 'fragile';
+    if (r < pMoving + pFragile + pVanish) return 'vanish';
+    return 'normal';
+  }
+
+  function generate() {
+    while (topY > camY - 300) {
+      var d = difficulty();
+      var gap = rand(75 + 25 * d, 115 + 40 * d);   // max 155 < jump height 169
+      var w = lerp(112, 64, d) * rand(0.85, 1.15);
+      var x = rand(0, W - w);
+      var type = pickType();
+      lastType = type;
+      topY -= gap;
+      platforms.push(makePlatform(x, topY, w, type));
+    }
+  }
+
+  function resetWorld() {
+    time = 0;
+    score = 0;
+    maxHeight = 0;
+    autoScroll = false;
+    lastType = 'normal';
+    camY = 0;
+    groundY = H - 70;
+    platforms = [makePlatform(0, groundY, W, 'normal')];
+    topY = groundY;
+    player = { x: W / 2, y: groundY, vx: 0, vy: -JUMP, squash: 0 };
+    active = false;
+    target = player.x;
+    generate();
+    hudScore.textContent = '0';
+    hudBest.textContent = best;
+  }
+
+  /* =====================================================
+     UPDATE
+     ===================================================== */
+  function isSolid(pl) {
+    if (pl.broken) return false;
+    if (pl.type === 'vanish') return ((time + pl.phase) % VANISH_PERIOD) < VANISH_VISIBLE;
+    return true;
+  }
+
+  function overlapsX(px, pl) {
+    var half = PW * 0.4;
+    return px + half > pl.x && px - half < pl.x + pl.w;
+  }
+
+  function update(dt) {
+    time += dt;
+    var p = player;
+
+    // --- horizontal control: chase the finger target ---
+    if (active) {
+      var lead = target - p.x;
+      if (lead > LEAD) { anchorTarget -= lead - LEAD; target = p.x + LEAD; }
+      else if (lead < -LEAD) { anchorTarget += -LEAD - lead; target = p.x - LEAD; }
+    }
+    var desired = active ? Math.max(-MAX_VX, Math.min(MAX_VX, (target - p.x) * FOLLOW)) : 0;
+    p.vx += (desired - p.vx) * Math.min(1, ACCEL * dt);
+    p.x += p.vx * dt;
+
+    // screen wrap
+    if (p.x < 0) { p.x += W; target += W; anchorTarget += W; }
+    else if (p.x >= W) { p.x -= W; target -= W; anchorTarget -= W; }
+
+    // --- vertical physics ---
+    var prevFeet = p.y;
+    p.vy += GRAVITY * dt;
+    p.y += p.vy * dt;
+    p.squash = Math.max(0, p.squash - dt * 6);
+
+    // --- platforms ---
+    for (var i = 0; i < platforms.length; i++) {
+      var pl = platforms[i];
+      if (pl.type === 'moving') {
+        pl.x += pl.dir * pl.speed * dt;
+        if (pl.x < 0) { pl.x = 0; pl.dir = 1; }
+        if (pl.x + pl.w > W) { pl.x = W - pl.w; pl.dir = -1; }
+      }
+      if (pl.broken) {
+        pl.fv += GRAVITY * 0.6 * dt;
+        pl.fy += pl.fv * dt;
+      }
+    }
+
+    // --- landing (only while falling) ---
+    if (p.vy > 0) {
+      for (var j = 0; j < platforms.length; j++) {
+        var q = platforms[j];
+        if (!isSolid(q)) continue;
+        if (prevFeet <= q.y + 2 && p.y >= q.y) {
+          if (overlapsX(p.x, q) || overlapsX(p.x - W, q) || overlapsX(p.x + W, q)) {
+            p.y = q.y;
+            p.vy = -(JUMP + Math.abs(p.vx) * JUMP_BOOST);
+            p.squash = 1;
+            if (q.type === 'fragile') q.broken = true;
+            break;
+          }
+        }
+      }
+    }
+
+    // --- score ---
+    var h = (groundY - p.y) / 10;
+    if (h > maxHeight) maxHeight = h;
+    var newScore = Math.floor(maxHeight);
+    if (newScore !== score) { score = newScore; hudScore.textContent = score; }
+
+    // --- camera ---
+    var targetCam = p.y - PH - H * 0.42;
+    if (targetCam < camY) camY += (targetCam - camY) * Math.min(1, 12 * dt);
+    if (!autoScroll && score > 12) autoScroll = true;
+    if (autoScroll) {
+      var speed = 22 + 75 * difficulty();
+      camY -= speed * dt;
+    }
+
+    // --- generate / clean ---
+    generate();
+    var limit = camY + H + 120;
+    var k = 0;
+    for (var m = 0; m < platforms.length; m++) {
+      var pp = platforms[m];
+      if (pp.y + pp.fy < limit) platforms[k++] = pp;
+    }
+    platforms.length = k;
+
+    // --- game over ---
+    if (p.y - PH > camY + H + 20) gameOver();
+  }
+
+  /* =====================================================
+     RENDER
+     ===================================================== */
+  function render() {
+    ctx.setTransform(dpr * sc, 0, 0, dpr * sc, 0, 0);
+    Renderer.background(ctx, H, camY, score);
+    for (var i = 0; i < platforms.length; i++) Renderer.platform(ctx, platforms[i], camY, time);
+    Renderer.player(ctx, player, camY);
+  }
+
+  /* =====================================================
+     FLOW
+     ===================================================== */
+  function startGame() {
+    resetWorld();
+    state = 'play';
+    startScreen.classList.remove('show');
+    overScreen.classList.remove('show');
+    hud.style.display = 'flex';
+  }
+
+  function gameOver() {
+    state = 'over';
+    active = false;
+    var isNew = score > best;
+    if (isNew) { best = score; saveBest(best); }
+    hudBest.textContent = best;
+    $('overScore').textContent = score;
+    $('overBest').textContent = best;
+    $('newBest').style.display = isNew && score > 0 ? 'block' : 'none';
+    hud.style.display = 'none';
+    overScreen.classList.add('show');
+  }
+
+  $('startBtn').addEventListener('click', startGame);
+  $('restartBtn').addEventListener('click', startGame);
+
+  /* =====================================================
+     INPUT (touch / pointer, drag to move)
+     ===================================================== */
+  function localX(e) {
+    var r = cv.getBoundingClientRect();
+    return (e.clientX - r.left) / r.width * W;
+  }
+
+  cv.addEventListener('pointerdown', function (e) {
+    if (state !== 'play') return;
+    e.preventDefault();
+    try { cv.setPointerCapture(e.pointerId); } catch (err) {}
+    active = true;
+    activeId = e.pointerId;
+    anchorTouch = localX(e);
+    anchorTarget = player.x;
+    target = player.x;
+  });
+  cv.addEventListener('pointermove', function (e) {
+    if (!active || e.pointerId !== activeId) return;
+    e.preventDefault();
+    target = anchorTarget + (localX(e) - anchorTouch) * SENSITIVITY;
+  });
+  function endPointer(e) {
+    if (e.pointerId === activeId) { active = false; activeId = null; }
+  }
+  cv.addEventListener('pointerup', endPointer);
+  cv.addEventListener('pointercancel', endPointer);
+
+  // block scrolling / zoom / long-press menu
+  document.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
+  document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
+  document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  document.addEventListener('dblclick', function (e) { e.preventDefault(); });
+
+  /* =====================================================
+     MAIN LOOP (fixed physics step)
+     ===================================================== */
+  var last = 0, acc = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    var dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.1) dt = 0.1;          // tab was in background
+    if (state === 'play') {
+      acc += dt;
+      var steps = 0;
+      while (acc >= STEP && steps < 12 && state === 'play') {
+        update(STEP);
+        acc -= STEP;
+        steps++;
+      }
+    } else {
+      acc = 0;
+    }
+    render();
+  }
+
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', function () { setTimeout(resize, 200); });
+  resize();
+  $('startBest').textContent = best;
+  requestAnimationFrame(function (t) { last = t; frame(t); });
+})();
+
+// PWA: register the service worker (only works on https:// or localhost, so skip on file://)
+if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('sw.js').catch(function () {});
+  });
+}
+</script>
+</body>
+</html>
